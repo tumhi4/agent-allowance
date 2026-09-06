@@ -4,6 +4,13 @@
 
 ---
 
+## 🔗 Verified Deployment & Telemetry Links
+- **GenLayer Explorer Contract**: [`0x82ebF2752149079e5228B3768afEbE58eb5D955F`](https://explorer-studio.genlayer.com/address/0x82ebF2752149079e5228B3768afEbE58eb5D955F)
+- **GitHub Repository**: [`https://github.com/tumhi4/agent-allowance`](https://github.com/tumhi4/agent-allowance)
+- **Live Invoice Telemetry**: [`https://tumhi4.github.io/agent-allowance/demo/mock_invoice_approved_api_compute.html`](https://tumhi4.github.io/agent-allowance/demo/mock_invoice_approved_api_compute.html)
+
+---
+
 ## 🌟 The Core Problem
 
 Autonomous AI agents (AutoGPT, LangChain, crewAI) need financial autonomy to pay for LLM inference tokens, GPU cloud compute, API subscriptions, and web scraping. However, giving AI agents raw private keys or unrestricted credit cards creates severe vulnerabilities:

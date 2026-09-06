@@ -30,6 +30,7 @@ class AgentSpendPolicy:
     spent_this_month_usdc: u256
     per_tx_cap_usdc: u256
     allowed_categories: str  # "COMPUTE,LLM_INFERENCE,STORAGE,APIS"
+    current_billing_month: str # "YYYY-MM" (e.g. "2026-08")
     is_active: bool
 
 
@@ -53,6 +54,7 @@ class AgentAllowance(gl.Contract):
     operator: str
     agent_policies: TreeMap[str, AgentSpendPolicy]
     invoices: TreeMap[str, InvoiceSpendRecord]
+    processed_invoices: TreeMap[str, bool]
     total_invoices_audited: u256
     total_disbursed_usdc: u256
 
@@ -61,7 +63,7 @@ class AgentAllowance(gl.Contract):
         self.total_invoices_audited = u256(0)
         self.total_disbursed_usdc = u256(0)
 
-        # Register Genesis Default AI Agent Policy (Agent 001)
+        # Register Genesis Default AI Agent Policy (Agent 001) with Initial Billing Month (2026-08)
         self.agent_policies["AGENT_RESEARCH_01"] = AgentSpendPolicy(
             agent_id="AGENT_RESEARCH_01",
             agent_name="Autonomous Research & Data Agent",
@@ -70,6 +72,7 @@ class AgentAllowance(gl.Contract):
             spent_this_month_usdc=u256(0),
             per_tx_cap_usdc=u256(1000),          # $1,000 max single payment
             allowed_categories="COMPUTE,LLM_INFERENCE,STORAGE,APIS",
+            current_billing_month="2026-08",
             is_active=True
         )
 
@@ -98,6 +101,7 @@ class AgentAllowance(gl.Contract):
             spent_this_month_usdc=u256(0),
             per_tx_cap_usdc=u256(per_tx_cap_usdc),
             allowed_categories=allowed_categories.strip(),
+            current_billing_month="2026-08",
             is_active=True
         )
         return f"Policy provisioned for {a_id} (Budget: ${monthly_budget_usdc} USDC)"
@@ -113,25 +117,36 @@ class AgentAllowance(gl.Contract):
     ) -> str:
         """
         Audits an AI agent purchase invoice via decentralized AI consensus.
-        Validates deliverable legitimacy, checks against agent spending caps,
-        and authorizes USDC disbursement.
+        Enforces caller authorization, invoice replay protection, consensus-bound verified amounts,
+        and automatic monthly reset lifecycles.
         """
         inv_id = invoice_id.strip()
         a_id = agent_id.strip()
         v_name = vendor_name.strip()
         clean_url = invoice_url.strip().strip('"').strip("'")
 
+        # INVARIANT 1: INVOICE REPLAY PROTECTION
+        assert inv_id not in self.processed_invoices and inv_id not in self.invoices, \
+            f"[ERR_INVOICE_REPLAY] Invoice '{inv_id}' has already been audited and processed."
+
+        # INVARIANT 2: CALLER AUTHORIZATION
         assert a_id in self.agent_policies, "[ERR_AGENT_01] Agent ID not registered in policy registry."
         policy = self.agent_policies[a_id]
         assert policy.is_active == True, "[ERR_AGENT_02] Agent policy is currently paused or inactive."
+
+        sender = str(gl.message.sender_address).lower()
+        assert sender == policy.owner_address.lower() or sender == self.operator, \
+            f"[ERR_AUTH_02] Caller '{sender}' is not authorized to submit invoices for agent '{a_id}'."
+
         assert clean_url.startswith("http://") or clean_url.startswith("https://"), \
             "[ERR_URL_01] Valid HTTP/HTTPS invoice URL required."
 
-        # Extract limits
+        # Extract policy limits
         m_budget = int(policy.monthly_budget_usdc)
         m_spent = int(policy.spent_this_month_usdc)
         tx_cap = int(policy.per_tx_cap_usdc)
         categories = str(policy.allowed_categories)
+        last_billing_month = str(policy.current_billing_month)
 
         time_url = "https://timeapi.io/api/time/current/zone?timeZone=UTC"
 
@@ -154,9 +169,10 @@ class AgentAllowance(gl.Contract):
                 f"Agent ID: {a_id}\n"
                 f"Vendor: {v_name}\n"
                 f"Claimed Amount: ${claimed_amount_usdc} USDC\n"
-                f"Monthly Budget: ${m_budget} (Spent so far: ${m_spent})\n"
+                f"Monthly Budget: ${m_budget} (Spent so far this cycle: ${m_spent})\n"
                 f"Per-Tx Limit: ${tx_cap}\n"
-                f"Allowed Categories: {categories}\n\n"
+                f"Allowed Categories: {categories}\n"
+                f"Current Billing Month: {last_billing_month}\n\n"
                 f"=== VENDOR INVOICE EVIDENCE STREAM ===\n"
                 f"{inv_data}"
             )
@@ -168,7 +184,7 @@ class AgentAllowance(gl.Contract):
             "1. clock_fresh: boolean (true if UTC Clock is fresh and valid)\n"
             "2. today_date: UTC date (YYYY-MM-DD format)\n"
             "3. invoice_valid: boolean (true if invoice DOM is accessible and parseable)\n"
-            "4. verified_amount_usdc: integer (exact dollar amount on the invoice)\n"
+            "4. verified_amount_usdc: integer (exact recomputed dollar amount on the invoice deliverable line items)\n"
             "5. category: string ('COMPUTE', 'LLM_INFERENCE', 'STORAGE', 'APIS', 'UNAUTHORIZED')\n"
             "6. security_verdict: Strict enum ('APPROVED_DISBURSEMENT', 'BLOCKED_UNAUTHORIZED_DRAIN', 'FLAGGED_PARTIAL_REVIEW')\n"
             "   - APPROVED_DISBURSEMENT: Invoice is authentic, within spending cap, and matches allowed category.\n"
@@ -180,7 +196,7 @@ class AgentAllowance(gl.Contract):
             '  "clock_fresh": true/false,\n'
             '  "today_date": "<YYYY-MM-DD>",\n'
             '  "invoice_valid": true/false,\n'
-            '  "verified_amount_usdc": <number>,\n'
+            '  "verified_amount_usdc": <integer>,\n'
             '  "category": "<string>",\n'
             '  "security_verdict": "<APPROVED_DISBURSEMENT|BLOCKED_UNAUTHORIZED_DRAIN|FLAGGED_PARTIAL_REVIEW>",\n'
             '  "reasoning": "<sentence>"\n'
@@ -190,15 +206,19 @@ class AgentAllowance(gl.Contract):
 
         criteria = (
             "AgentAllowance Invoice Equivalence Rule:\n"
-            "1. Strict Fields (100% exact match required):\n"
+            "1. Strict Consensus Fields (100% exact match required across all validator nodes):\n"
             "   - clock_fresh (boolean: true)\n"
             "   - today_date (YYYY-MM-DD)\n"
             "   - invoice_valid (boolean: true)\n"
+            "   - verified_amount_usdc (integer matching exact itemized invoice total)\n"
+            "   - category (enum 'COMPUTE', 'LLM_INFERENCE', 'STORAGE', 'APIS', 'UNAUTHORIZED')\n"
             "   - security_verdict (enum 'APPROVED_DISBURSEMENT', 'BLOCKED_UNAUTHORIZED_DRAIN', 'FLAGGED_PARTIAL_REVIEW')\n"
-            "Independently audit the invoice. REJECT the leader proposal if:\n"
-            "(1) security_verdict is marked APPROVED when invoice exceeds per_tx_cap or monthly budget,\n"
-            "(2) security_verdict is marked APPROVED when invoice category is not in allowed_categories,\n"
-            "(3) invoice_valid is marked false or clock_fresh is marked false.\n"
+            "Independently parse invoice DOM, recompute deliverables, and check policy limits.\n"
+            "REJECT the leader proposal if:\n"
+            "(1) verified_amount_usdc does not match the exact itemized invoice deliverable sum in the DOM,\n"
+            "(2) security_verdict is marked APPROVED when verified_amount_usdc exceeds per_tx_cap or monthly budget,\n"
+            "(3) security_verdict is marked APPROVED when category is not in allowed_categories,\n"
+            "(4) invoice_valid is marked false or clock_fresh is marked false.\n"
             "Output must be valid JSON matching the schema."
         )
 
@@ -225,16 +245,26 @@ class AgentAllowance(gl.Contract):
         invoice_valid = bool(res_parsed.get("invoice_valid", False))
         assert invoice_valid == True, "[ERR_INVOICE_01] Invoice DOM stream invalid or inaccessible (Fail-Closed)."
 
+        today_str = str(res_parsed.get("today_date", "2026-08-21"))
         verdict = str(res_parsed.get("security_verdict", "BLOCKED_UNAUTHORIZED_DRAIN")).strip().upper()
         ver_amt = int(res_parsed.get("verified_amount_usdc", claimed_amount_usdc))
         cat = str(res_parsed.get("category", "APIS")).strip().upper()
         reasoning = str(res_parsed.get("reasoning", "Invoice audit complete."))
-        today_str = str(res_parsed.get("today_date", "2026-08-21"))
 
-        # Invariant Safety Check: Budget Constraints
+        # INVARIANT 3: REAL MONTHLY RESET LIFECYCLE
+        # Automatically resets monthly spend counter when calendar month advances
+        curr_billing_month = today_str[:7]  # "YYYY-MM"
+        if last_billing_month != curr_billing_month:
+            m_spent = 0  # Reset monthly spending counter
+
+        # Invariant Safety Check: Budget Constraints with Consensus-Bound Amount
         if (m_spent + ver_amt) > m_budget or ver_amt > tx_cap:
             verdict = "BLOCKED_UNAUTHORIZED_DRAIN"
             reasoning = f"Budget overrun: Claim ${ver_amt} exceeds cap (${tx_cap}) or monthly allowance (${m_budget})."
+
+        if cat not in [c.strip() for c in categories.split(",")]:
+            verdict = "BLOCKED_UNAUTHORIZED_DRAIN"
+            reasoning = f"Unauthorized category '{cat}' not permitted by agent spend mandate ({categories})."
 
         # Update Agent Spent State if Approved
         if verdict == "APPROVED_DISBURSEMENT":
@@ -247,7 +277,7 @@ class AgentAllowance(gl.Contract):
             new_spent = m_spent
             summary = f"BLOCKED: Payment to {v_name} rejected. {reasoning}"
 
-        # Persist Agent Spent State
+        # Persist Agent Spent State & Updated Billing Month
         self.agent_policies[a_id] = AgentSpendPolicy(
             agent_id=policy.agent_id,
             agent_name=policy.agent_name,
@@ -256,10 +286,11 @@ class AgentAllowance(gl.Contract):
             spent_this_month_usdc=u256(new_spent),
             per_tx_cap_usdc=policy.per_tx_cap_usdc,
             allowed_categories=policy.allowed_categories,
+            current_billing_month=curr_billing_month,
             is_active=policy.is_active
         )
 
-        # Record Invoice in Registry
+        # Record Invoice & Mark Invoice as Processed for Replay Protection
         new_inv = InvoiceSpendRecord(
             invoice_id=inv_id,
             agent_id=a_id,
@@ -275,6 +306,7 @@ class AgentAllowance(gl.Contract):
         )
 
         self.invoices[inv_id] = new_inv
+        self.processed_invoices[inv_id] = True
         self.total_invoices_audited = u256(int(self.total_invoices_audited) + 1)
 
         return summary
