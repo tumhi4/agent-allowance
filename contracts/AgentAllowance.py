@@ -11,6 +11,7 @@ Key Architectural Invariants:
 2. Semantic Invoice Audit: AI validators verify invoice legitimacy, vendor domain, and service deliverable.
 3. Unified Single-Round Consensus: Clock freshness and invoice inspection execute in 1 parallel round.
 4. 100% Fail-Closed Safety: Any discrepancy or inaccessible invoice halts payment execution.
+5. Evidence-Bound Replay Protection: Keyed to consensus-extracted canonical invoice identifier in the DOM (vendor:canonical_id).
 """
 
 import json
@@ -40,6 +41,7 @@ class InvoiceSpendRecord:
     invoice_id: str
     agent_id: str
     vendor_name: str
+    canonical_invoice_id: str
     claimed_amount_usdc: u256
     verified_amount_usdc: u256
     expense_category: str
@@ -184,18 +186,20 @@ class AgentAllowance(gl.Contract):
             "1. clock_fresh: boolean (true if UTC Clock is fresh and valid)\n"
             "2. today_date: UTC date (YYYY-MM-DD format)\n"
             "3. invoice_valid: boolean (true if invoice DOM is accessible and parseable)\n"
-            "4. verified_amount_usdc: integer (exact recomputed dollar amount on the invoice deliverable line items)\n"
-            "5. category: string ('COMPUTE', 'LLM_INFERENCE', 'STORAGE', 'APIS', 'UNAUTHORIZED')\n"
-            "6. security_verdict: Strict enum ('APPROVED_DISBURSEMENT', 'BLOCKED_UNAUTHORIZED_DRAIN', 'FLAGGED_PARTIAL_REVIEW')\n"
+            "4. canonical_invoice_id: string (exact official invoice number or identifier printed on the invoice document itself in the DOM, e.g. 'INV_OPENAI_8821'. If no invoice identifier exists anywhere in the document, output 'NONE' and set invoice_valid to false)\n"
+            "5. verified_amount_usdc: integer (exact recomputed dollar amount on the invoice deliverable line items)\n"
+            "6. category: string ('COMPUTE', 'LLM_INFERENCE', 'STORAGE', 'APIS', 'UNAUTHORIZED')\n"
+            "7. security_verdict: Strict enum ('APPROVED_DISBURSEMENT', 'BLOCKED_UNAUTHORIZED_DRAIN', 'FLAGGED_PARTIAL_REVIEW')\n"
             "   - APPROVED_DISBURSEMENT: Invoice is authentic, within spending cap, and matches allowed category.\n"
             "   - BLOCKED_UNAUTHORIZED_DRAIN: Invoice is fake, exceeds monthly budget/tx cap, or claims unauthorized personal expenses.\n"
             "   - FLAGGED_PARTIAL_REVIEW: Invoice contains ambiguous or unitemized surcharges.\n"
-            "7. reasoning: Concise 1-2 sentence explanation of audit verdict.\n\n"
+            "8. reasoning: Concise 1-2 sentence explanation of audit verdict.\n\n"
             "Output JSON format:\n"
             "{\n"
             '  "clock_fresh": true/false,\n'
             '  "today_date": "<YYYY-MM-DD>",\n'
             '  "invoice_valid": true/false,\n'
+            '  "canonical_invoice_id": "<exact printed invoice ID or NONE>",\n'
             '  "verified_amount_usdc": <integer>,\n'
             '  "category": "<string>",\n'
             '  "security_verdict": "<APPROVED_DISBURSEMENT|BLOCKED_UNAUTHORIZED_DRAIN|FLAGGED_PARTIAL_REVIEW>",\n'
@@ -210,15 +214,18 @@ class AgentAllowance(gl.Contract):
             "   - clock_fresh (boolean: true)\n"
             "   - today_date (YYYY-MM-DD)\n"
             "   - invoice_valid (boolean: true)\n"
+            "   - canonical_invoice_id (string exactly matching the invoice identifier printed in the DOM)\n"
             "   - verified_amount_usdc (integer matching exact itemized invoice total)\n"
             "   - category (enum 'COMPUTE', 'LLM_INFERENCE', 'STORAGE', 'APIS', 'UNAUTHORIZED')\n"
             "   - security_verdict (enum 'APPROVED_DISBURSEMENT', 'BLOCKED_UNAUTHORIZED_DRAIN', 'FLAGGED_PARTIAL_REVIEW')\n"
-            "Independently parse invoice DOM, recompute deliverables, and check policy limits.\n"
+            "Independently parse invoice DOM, recompute deliverables, extract canonical invoice identifier, and check policy limits.\n"
             "REJECT the leader proposal if:\n"
-            "(1) verified_amount_usdc does not match the exact itemized invoice deliverable sum in the DOM,\n"
-            "(2) security_verdict is marked APPROVED when verified_amount_usdc exceeds per_tx_cap or monthly budget,\n"
-            "(3) security_verdict is marked APPROVED when category is not in allowed_categories,\n"
-            "(4) invoice_valid is marked false or clock_fresh is marked false.\n"
+            "(1) canonical_invoice_id does not match the identifier printed in the invoice document DOM — "
+            "REJECT if the leader fabricates an ID not in the DOM, alters the printed ID, or claims NONE when an identifier is present,\n"
+            "(2) verified_amount_usdc does not match the exact itemized invoice deliverable sum in the DOM,\n"
+            "(3) security_verdict is marked APPROVED when verified_amount_usdc exceeds per_tx_cap or monthly budget,\n"
+            "(4) security_verdict is marked APPROVED when category is not in allowed_categories,\n"
+            "(5) invoice_valid is marked false or clock_fresh is marked false.\n"
             "Output must be valid JSON matching the schema."
         )
 
@@ -244,6 +251,16 @@ class AgentAllowance(gl.Contract):
 
         invoice_valid = bool(res_parsed.get("invoice_valid", False))
         assert invoice_valid == True, "[ERR_INVOICE_01] Invoice DOM stream invalid or inaccessible (Fail-Closed)."
+
+        canonical_id = str(res_parsed.get("canonical_invoice_id", "")).strip().upper()
+        assert len(canonical_id) > 0 and canonical_id != "NONE", \
+            "[ERR_INVOICE_03] No canonical invoice identifier found in document (Fail-Closed)."
+
+        # INVARIANT: CONSENSUS-VERIFIED CANONICAL REPLAY KEYING
+        # Keyed directly by consensus-verified document evidence (vendor + canonical ID)
+        canonical_key = f"{v_name.lower()}:{canonical_id}"
+        assert canonical_key not in self.processed_invoices, \
+            f"[ERR_INVOICE_REPLAY] Canonical invoice '{canonical_id}' from vendor '{v_name}' has already been processed."
 
         today_str = str(res_parsed.get("today_date", "2026-08-21"))
         verdict = str(res_parsed.get("security_verdict", "BLOCKED_UNAUTHORIZED_DRAIN")).strip().upper()
@@ -295,6 +312,7 @@ class AgentAllowance(gl.Contract):
             invoice_id=inv_id,
             agent_id=a_id,
             vendor_name=v_name,
+            canonical_invoice_id=canonical_id,
             claimed_amount_usdc=u256(claimed_amount_usdc),
             verified_amount_usdc=u256(ver_amt),
             expense_category=cat,
@@ -307,6 +325,7 @@ class AgentAllowance(gl.Contract):
 
         self.invoices[inv_id] = new_inv
         self.processed_invoices[inv_id] = True
+        self.processed_invoices[canonical_key] = True
         self.total_invoices_audited = u256(int(self.total_invoices_audited) + 1)
 
         return summary

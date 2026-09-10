@@ -1,8 +1,8 @@
-﻿import { createClient } from '../../AetherDungeon/frontend/node_modules/genlayer-js/dist/index.js';
+import { createClient } from '../../AetherDungeon/frontend/node_modules/genlayer-js/dist/index.js';
 
 async function testLive() {
     const client = createClient({ endpoint: 'https://studio.genlayer.com/api' });
-    const contractAddress = '0x82ebF2752149079e5228B3768afEbE58eb5D955F';
+    const contractAddress = '0xEFF74aBcfa4006C2601aDaEcb259700ef1870e89';
     console.log("Testing live view on deployed contract:", contractAddress);
     
     try {

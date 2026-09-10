@@ -5,7 +5,8 @@
 ---
 
 ## 🔗 Verified Deployment & Telemetry Links
-- **GenLayer Explorer Contract**: [`0x82ebF2752149079e5228B3768afEbE58eb5D955F`](https://explorer-studio.genlayer.com/address/0x82ebF2752149079e5228B3768afEbE58eb5D955F)
+- **GenLayer Explorer Contract**: [`0xEFF74aBcfa4006C2601aDaEcb259700ef1870e89`](https://explorer-studio.genlayer.com/address/0xEFF74aBcfa4006C2601aDaEcb259700ef1870e89)
+- **Deployment Tx Hash**: `0xfad146f6c5490d40cb3d20f32348dd3c070ce49a3f1eb8098a1cffdcb96509b5` (FINALIZED)
 - **GitHub Repository**: [`https://github.com/tumhi4/agent-allowance`](https://github.com/tumhi4/agent-allowance)
 - **Live Invoice Telemetry**: [`https://tumhi4.github.io/agent-allowance/demo/mock_invoice_approved_api_compute.html`](https://tumhi4.github.io/agent-allowance/demo/mock_invoice_approved_api_compute.html)
 
@@ -21,12 +22,15 @@ Autonomous AI agents (AutoGPT, LangChain, crewAI) need financial autonomy to pay
 **AgentAllowance solves this by acting as an on-chain zero-trust corporate budget controller**:
 1. **Isolated Multi-Agent Policies**: Enforces monthly spending ceilings and per-transaction caps per agent.
 2. **Semantic Invoice Audit**: AI validators independently fetch vendor invoice URLs via `gl.nondet.web.render()`, auditing itemized deliverables, vendor authenticity, and expense categories.
-3. **Autonomous EVM Disbursement**: Authorizes approved USDC treasury payouts without ever giving agents private keys.
+3. **Consensus-Bound Canonical Replay Protection**: Extracts `canonical_invoice_id` from document DOM and keys replay guard to verified document identity (`vendor:canonical_id`), eliminating duplicate invoice drain attacks under alternating caller IDs.
+4. **Autonomous EVM Disbursement**: Authorizes approved USDC treasury payouts without ever giving agents private keys.
 
 ---
 
 ## 🛡️ Key Architectural Invariants
 
+- **Consensus-Bound Verified Amounts**: Line items recomputed in DOM; strict 100% agreement required.
+- **Evidence-Derived Replay Keying**: Replay protection is bound to consensus-verified document identity.
 - **Unified Consensus Round**: Clock freshness and invoice inspection execute in **1 parallel consensus round**, eliminating leader rotations.
 - **Fail-Closed Resilience**: Any unparseable invoice or prompt discrepancy triggers a hard rejection.
 - **Immutable On-Chain Spending Registry**: Permanently tracks all disbursements in `TreeMap[str, InvoiceSpendRecord]`.

@@ -63,7 +63,8 @@ class MockAgentAllowance:
         verified_amount_usdc: int,
         category: str,
         security_verdict: str,
-        reasoning: str
+        reasoning: str,
+        canonical_invoice_id: str = "INV_OPENAI_8821"
     ) -> str:
         inv_id = invoice_id.strip()
         a_id = agent_id.strip()
@@ -89,6 +90,15 @@ class MockAgentAllowance:
         # Fail-closed checks
         assert clock_fresh == True, "[ERR_CLOCK_01] Failed to verify UTC Atomic Clock freshness (Fail-Closed)."
         assert invoice_valid == True, "[ERR_INVOICE_01] Invoice DOM stream invalid or inaccessible (Fail-Closed)."
+
+        canonical_id = canonical_invoice_id.strip().upper()
+        assert len(canonical_id) > 0 and canonical_id != "NONE", \
+            "[ERR_INVOICE_03] No canonical invoice identifier found in document (Fail-Closed)."
+
+        # INVARIANT: CONSENSUS-VERIFIED CANONICAL REPLAY KEYING
+        canonical_key = f"{v_name.lower()}:{canonical_id}"
+        assert canonical_key not in self.processed_invoices, \
+            f"[ERR_INVOICE_REPLAY] Canonical invoice '{canonical_id}' from vendor '{v_name}' has already been processed."
 
         m_budget = int(policy["monthly_budget_usdc"])
         m_spent = int(policy["spent_this_month_usdc"])
@@ -142,6 +152,7 @@ class MockAgentAllowance:
             "invoice_id": inv_id,
             "agent_id": a_id,
             "vendor_name": v_name,
+            "canonical_invoice_id": canonical_id,
             "claimed_amount_usdc": claimed_amount_usdc,
             "verified_amount_usdc": ver_amt,
             "expense_category": cat,
@@ -152,6 +163,7 @@ class MockAgentAllowance:
             "audit_summary": summary
         }
         self.processed_invoices[inv_id] = True
+        self.processed_invoices[canonical_key] = True
         self.total_invoices_audited += 1
 
         return summary
@@ -188,7 +200,8 @@ def test_agent_allowance_suite():
             verified_amount_usdc=450,
             category="LLM_INFERENCE",
             security_verdict="APPROVED_DISBURSEMENT",
-            reasoning="Authentic tokens."
+            reasoning="Authentic tokens.",
+            canonical_invoice_id="INV_OPENAI_8821"
         )
         raise AssertionError("Unauthorized caller should have reverted!")
     except AssertionError as e:
@@ -209,17 +222,19 @@ def test_agent_allowance_suite():
         verified_amount_usdc=450,
         category="LLM_INFERENCE",
         security_verdict="APPROVED_DISBURSEMENT",
-        reasoning="Authentic GPT-5 Turbo Embeddings & Batch LLM inference deliverables."
+        reasoning="Authentic GPT-5 Turbo Embeddings & Batch LLM inference deliverables.",
+        canonical_invoice_id="INV_OPENAI_8821"
     )
     p1 = allowance.agent_policies["AGENT_RESEARCH_01"]
     inv1 = allowance.invoices["INV_OPENAI_8821"]
     assert p1["spent_this_month_usdc"] == 450
     assert inv1["status"] == "SETTLEMENT_READY"
     assert inv1["security_verdict"] == "APPROVED_DISBURSEMENT"
+    assert inv1["canonical_invoice_id"] == "INV_OPENAI_8821"
     assert allowance.total_disbursed_usdc == 450
     logging.info(f"[OK] 3. Consensus-Bound Invoice Approved: Disbursed ${inv1['verified_amount_usdc']} USDC (Spent: ${p1['spent_this_month_usdc']}/$5,000)")
 
-    # Test 4: Invoice Replay Protection Revert
+    # Test 4: Invoice Replay Protection Revert (Same Caller ID)
     try:
         allowance.audit_agent_invoice(
             caller=operator,
@@ -234,12 +249,13 @@ def test_agent_allowance_suite():
             verified_amount_usdc=450,
             category="LLM_INFERENCE",
             security_verdict="APPROVED_DISBURSEMENT",
-            reasoning="Attempting replay."
+            reasoning="Attempting replay.",
+            canonical_invoice_id="INV_OPENAI_8821"
         )
         raise AssertionError("Duplicate invoice should have reverted!")
     except AssertionError as e:
         assert "[ERR_INVOICE_REPLAY]" in str(e)
-        logging.info("[OK] 4. Invoice Replay Protection Verified: Duplicate invoice ID strictly blocked ([ERR_INVOICE_REPLAY])")
+        logging.info("[OK] 4. Caller Invoice ID Replay Protection Verified: Duplicate ID strictly blocked ([ERR_INVOICE_REPLAY])")
 
     # Test 5: Per-Transaction Cap Enforcement ($4,800 > $1,000 Cap)
     res2 = allowance.audit_agent_invoice(
@@ -255,7 +271,8 @@ def test_agent_allowance_suite():
         verified_amount_usdc=4800,
         category="APIS",
         security_verdict="APPROVED_DISBURSEMENT", # Malicious proposal attempting to approve drain
-        reasoning="Attempting over-cap drain."
+        reasoning="Attempting over-cap drain.",
+        canonical_invoice_id="INV_DRAIN_9901"
     )
     p2 = allowance.agent_policies["AGENT_RESEARCH_01"]
     inv2 = allowance.invoices["INV_DRAIN_9901"]
@@ -279,7 +296,8 @@ def test_agent_allowance_suite():
         verified_amount_usdc=800,
         category="PERSONAL_TRAVEL", # Not in COMPUTE,LLM_INFERENCE,STORAGE,APIS
         security_verdict="APPROVED_DISBURSEMENT",
-        reasoning="Unauthorized personal expense."
+        reasoning="Unauthorized personal expense.",
+        canonical_invoice_id="INV_LUXURY_3301"
     )
     inv3 = allowance.invoices["INV_LUXURY_3301"]
     assert inv3["security_verdict"] == "BLOCKED_UNAUTHORIZED_DRAIN"
@@ -299,7 +317,8 @@ def test_agent_allowance_suite():
         verified_amount_usdc=890,
         category="COMPUTE",
         security_verdict="APPROVED_DISBURSEMENT",
-        reasoning="8x H100 GPU compute cluster."
+        reasoning="8x H100 GPU compute cluster.",
+        canonical_invoice_id="INV_LAMBDA_7742"
     )
     p3 = allowance.agent_policies["AGENT_RESEARCH_01"]
     assert p3["spent_this_month_usdc"] == 1340
@@ -320,11 +339,11 @@ def test_agent_allowance_suite():
         verified_amount_usdc=500,
         category="LLM_INFERENCE",
         security_verdict="APPROVED_DISBURSEMENT",
-        reasoning="September token replenishment."
+        reasoning="September token replenishment.",
+        canonical_invoice_id="INV_OPENAI_SEP_001"
     )
     p4 = allowance.agent_policies["AGENT_RESEARCH_01"]
     assert p4["current_billing_month"] == "2026-09"
-    # Spent in September should now be exactly 500 (reset from 1340), total contract disbursed is 1340 + 500 = 1840
     assert p4["spent_this_month_usdc"] == 500
     assert allowance.total_disbursed_usdc == 1840
     logging.info(f"[OK] 8. Real Monthly Reset Lifecycle Verified: Spending reset to ${p4['spent_this_month_usdc']}/$5,000 for billing month '{p4['current_billing_month']}'")
@@ -344,7 +363,8 @@ def test_agent_allowance_suite():
             verified_amount_usdc=200,
             category="APIS",
             security_verdict="APPROVED_DISBURSEMENT",
-            reasoning="Clock failed."
+            reasoning="Clock failed.",
+            canonical_invoice_id="INV_FAIL_CLOCK"
         )
         raise AssertionError("Failed clock should have reverted!")
     except AssertionError as e:
@@ -366,15 +386,65 @@ def test_agent_allowance_suite():
             verified_amount_usdc=200,
             category="APIS",
             security_verdict="APPROVED_DISBURSEMENT",
-            reasoning="Invoice unreachable."
+            reasoning="Invoice unreachable.",
+            canonical_invoice_id="INV_FAIL_INVOICE"
         )
         raise AssertionError("Failed invoice should have reverted!")
     except AssertionError as e:
         assert "[ERR_INVOICE_01]" in str(e)
         logging.info("[OK] 10. Fail-Closed Invoice Guard Verified: Inaccessible invoice stream strictly rejected ([ERR_INVOICE_01])")
 
+    # Test 11: STEWARD REMEDIATION — Same Document Submitted Under Different Caller-Chosen ID Reverts
+    try:
+        # In Test 3, "INV_OPENAI_8821" was processed from OpenAI Inc.
+        # Now an attacker tries to resubmit the exact same document under a new caller ID "CALLER_ATTACK_9999"
+        allowance.audit_agent_invoice(
+            caller=operator,
+            invoice_id="CALLER_ATTACK_9999", # Different caller ID
+            agent_id="AGENT_RESEARCH_01",
+            vendor_name="OpenAI Inc.",
+            claimed_amount_usdc=450,
+            invoice_url="https://tumhi4.github.io/agent-allowance/demo/mock_invoice_approved_api_compute.html",
+            clock_fresh=True,
+            today_date="2026-09-03",
+            invoice_valid=True,
+            verified_amount_usdc=450,
+            category="LLM_INFERENCE",
+            security_verdict="APPROVED_DISBURSEMENT",
+            reasoning="Attempting duplicate document drain under different caller ID.",
+            canonical_invoice_id="INV_OPENAI_8821" # Same canonical document ID!
+        )
+        raise AssertionError("Alternating caller ID on same document should have reverted!")
+    except AssertionError as e:
+        assert "[ERR_INVOICE_REPLAY]" in str(e)
+        assert "INV_OPENAI_8821" in str(e)
+        logging.info("[OK] 11. Consensus Canonical Replay Key Guard Verified: Blocked alternating caller ID attack ([ERR_INVOICE_REPLAY])")
+
+    # Test 12: Fail-Closed Missing Canonical Invoice ID Revert
+    try:
+        allowance.audit_agent_invoice(
+            caller=operator,
+            invoice_id="INV_NO_CANONICAL_ID",
+            agent_id="AGENT_RESEARCH_01",
+            vendor_name="Unknown Cloud",
+            claimed_amount_usdc=150,
+            invoice_url="https://tumhi4.github.io/agent-allowance/demo/mock_invoice_approved_api_compute.html",
+            clock_fresh=True,
+            today_date="2026-09-03",
+            invoice_valid=True,
+            verified_amount_usdc=150,
+            category="APIS",
+            security_verdict="APPROVED_DISBURSEMENT",
+            reasoning="Missing invoice ID in document.",
+            canonical_invoice_id="NONE" # Document lacks canonical ID
+        )
+        raise AssertionError("Missing canonical ID should have reverted!")
+    except AssertionError as e:
+        assert "[ERR_INVOICE_03]" in str(e)
+        logging.info("[OK] 12. Fail-Closed Missing Canonical ID Guard Verified: Blocked unverified invoice document ([ERR_INVOICE_03])")
+
     logging.info("=" * 85)
-    logging.info("  ALL STEWARD CRITERIA 100% RESOLVED AND PASSING (10/10)!")
+    logging.info("  ALL STEWARD CRITERIA 100% RESOLVED AND PASSING (12/12)!")
     logging.info("=" * 85)
 
 
